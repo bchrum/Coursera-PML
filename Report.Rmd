@@ -1,0 +1,250 @@
+Predicting Proper Form
+========================================================
+
+Author:  Robert Chrum  
+Date:  January 22, 2015  
+Data Source:   Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
+
+## Summary
+
+Motion and acceleration data gathered when executing dumbbell curls can be used to determine if the exercise was performed properly or if one of four common weight-lifting mistakes was made.
+
+## Background
+
+Data was gathered to investigate how well exercises are performed and how common mistakes in executing weight lifting motions can be measured and predicted.  Six participants performed one set of 10 repetitions of a dumbell curl in five different fashions:  exactly according to specification (class A), throwing elbows to the front (class B), lifting the dumbbell only halfway (class C), lowering the dumbbell only halfway (class D) and throwing the hips to the front (class E). Various sensor measurements were taken during the time the repetitions were executed.  
+
+In this analysis, machine learning based techniques are applied to this data set to create a model to predict the class of weight-lift given motion and acceleration data.  The resulting model is applied to a validation set in order to provide a reasonably accurate indication of the model's out of sample error.  This model will then be used to predict the class of weight-lift for 20 samples of data.
+
+## Data Download and Preprocessing
+
+The data have been downloaded from [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv).
+
+After being read in, the data is divided between a training set, test set and validation set in a 60/20/20 split.  There is enough data - over 19,000 rows - to justify the use of a separate validation data set.   We will train various models on the 60% training set and evaluate each model's performance (classification error) on the 20% test set.  Whichever model performs best on the test set will become our chosen model, which will then be applied to the validation data set to estimate our out-of-sample error.
+
+```{r Read and Split Data, warning=FALSE, message=FALSE}
+
+library(caret)
+library(gbm)
+library(survival)
+library(splines)
+library(ggplot2)
+library(parallel)
+library(plyr)
+library(randomForest)
+library(MASS)
+
+## pmltrain1 will contain the training set.
+## pmltest will contain the test set.
+## pmlvalidate will contain the validation set.
+
+pmltraining <- read.csv("pml-training.csv",header=T)
+set.seed(7665)
+inTrain <- createDataPartition(y=pmltraining$classe,p=0.8,list=FALSE)
+pmltrain0 <- pmltraining[inTrain,]
+pmlvalidate <- pmltraining[-inTrain,]
+inTest <- createDataPartition(y=pmltrain0$classe,p=0.25,list=FALSE)
+pmltest <- pmltrain0[inTest,]
+pmltrain1 <- pmltrain0[-inTest,]
+
+```
+
+Next the data is pre-processed.   
+
+Given the process by which this experiment was conducted, including timestamp values in the prediction model runs too high a risk of over fitting the training data, so timestamp values will be removed.  
+
+Since username will be part of the data set to which we will apply our model and predict movement class, we will include username in the prediction model.  
+
+We will remove variables that have near zero variance, as well as variables whose overwhelming majority of values = 'NA'.  
+
+Then, since the ranges for the variables differ significantly, we will center and scale the data after first temporarily removing username and response variables.  Once the rest of the data has been centered and scaled, the username variable will be added back as indicator variables and the response variable will be added back.
+
+
+```{r Pre-Process}
+
+##Idendify and delete near zero variance variables
+
+nzv <- nearZeroVar(pmltrain1)
+pmltrain2 <- pmltrain1[,-nzv]
+
+##Delete timestamp and index variables.
+##Also delete user_name variable - it will be converted to indicator later
+##Also delete response (classe) - it will be added back later
+
+pmltrainset <- subset(pmltrain2, select=-c(X,user_name,raw_timestamp_part_1,raw_timestamp_part_2,cvtd_timestamp,classe))
+classe <- pmltrain1$classe
+
+##Identify and eliminate variables that are almost completely NA
+
+firstrow <- pmltrainset[1,]
+fr <- is.na(firstrow)
+pmltrainset2 <- pmltrainset[-c(which(fr))]
+
+##Center and Scale
+
+cs <- preProcess(pmltrainset2,method=c("center","scale"))
+pmltrainset3 <- predict(cs,pmltrainset2)
+
+##Add indicator variables for user_name:
+
+pmltrainset3$user2 <- ifelse(pmltrain1$user_name=="carlitos",1,0)
+pmltrainset3$user3 <- ifelse(pmltrain1$user_name=="charles",1,0)
+pmltrainset3$user4 <- ifelse(pmltrain1$user_name=="eurico",1,0)
+pmltrainset3$user5 <- ifelse(pmltrain1$user_name=="jeremy",1,0)
+pmltrainset3$user6 <- ifelse(pmltrain1$user_name=="pedro",1,0)
+
+##Add back response
+
+pmltrainset4 <- cbind(pmltrainset3,classe)
+
+```
+
+
+## Building the Model
+
+Now that the data have been pre-processed, we can begin model building.  We will build a model using Random Forests and a model using the Boosting technique.  We'll then stack these models using various ensemble techniques and apply each model to the test set to determine the model with the best prediction ability.
+
+```{r Model Building1, warning=FALSE, error=FALSE, message=FALSE, cache=TRUE}
+
+set.seed(830)
+##Create Boosting model:
+fitBoost <- train(classe ~., method="gbm",data=pmltrainset4,verbose=FALSE)
+
+set.seed(122)
+##Create Random Forest model:
+fitRF <- train(classe ~.,method="rf",data=pmltrainset4,prox=TRUE)
+
+```
+
+To use the random forest and boosting model objects in our ensemble models, we need to create the prediction objects based on those models.  Before predicting, we need to pre-process the test data in the same way we pre-processed the training data:
+
+```{r RF and Boost Prediction Objects, cache=TRUE}
+
+##Run appropriate preprocessing on test set:
+testclass <- pmltest$classe
+pmltest2 <- pmltest[,-nzv]
+pmltestset <- subset(pmltest2, select=-c
+                     (X,user_name,raw_timestamp_part_1,raw_timestamp_part_2,cvtd_timestamp,classe))
+pmltestset2 <- pmltestset[-c(which(fr))]
+pmltestset3 <- predict(cs,pmltestset2)
+pmltestset3$user2 <- ifelse(pmltest$user_name=="carlitos",1,0)
+pmltestset3$user3 <- ifelse(pmltest$user_name=="charles",1,0)
+pmltestset3$user4 <- ifelse(pmltest$user_name=="eurico",1,0)
+pmltestset3$user5 <- ifelse(pmltest$user_name=="jeremy",1,0)
+pmltestset3$user6 <- ifelse(pmltest$user_name=="pedro",1,0)
+pmltestset4 <- cbind(pmltestset3,classe=testclass)
+
+##Predict on test set
+predRF <- predict(fitRF,pmltestset4)
+predBoost <- predict(fitBoost,pmltestset4)
+
+```
+
+Now that we have our prediction objects, we can create our ensemble models:
+
+```{r Ensemble Models, warning=FALSE, error=FALSE, message=FALSE}
+
+#Create ensemble models:
+set.seed(40)
+pmlCombine <- data.frame(predRF,predBoost,classe=testclass)
+
+## This creates a random forest ensemble model
+fitCombine2 <- train(classe ~., method="rf", data=pmlCombine)
+
+## This creates a linear discriminant analysis ensemble model
+fitCombine3 <- train(classe ~., method="lda", data=pmlCombine)
+
+## This creates a generalized boosted ensemble model
+fitCombine5 <- train(classe ~., method="gbm", data=pmlCombine,verbose=FALSE)
+
+```
+
+Next, we predict with our ensemble models:
+
+```{r Ensemble Predictions}
+
+##Predict using ensemble models:
+pred_rf <- predict(fitCombine2,pmlCombine)
+pred_lda <- predict(fitCombine3,pmlCombine)
+pred_gbm <- predict(fitCombine5,pmlCombine)
+
+```
+
+Finally, we determine the classification error for each model and display in a table:
+
+```{r Model Error}
+
+##Find classification error for all models:
+mceRF <- sum(predRF==pmltest$classe)/length(pmltest$classe)
+mceBoost <- sum(predBoost==pmltest$classe)/length(pmltest$classe)
+mce_rf <- sum(pred_rf==pmltest$classe)/length(pmltest$classe)
+mce_lda <- sum(pred_lda==pmltest$classe)/length(pmltest$classe)
+mce_gbm <- sum(pred_gbm==pmltest$classe)/length(pmltest$classe)
+ME <- data.frame(cbind(Model=c("Random Forest","Boosting","Ensemble_RF","Ensemble_LDA","Ensemble_GBM"),Error=round(c(1-mceRF,1-mceBoost,1-mce_rf,1-mce_lda,1-mce_gbm),4)))
+
+```
+
+```{r Test Set Error Table}
+
+print(ME)
+
+```
+
+The table shows that both the Random Forest and GBM ensemble methods produced the lowest error in the test set. We will choose the Random Forest model. 
+
+We can view a bit more information about the model by looking at its confusion matrix:
+
+```{r ConfusionMatrix}
+
+confusionMatrix(pred_rf,pmltest$classe)
+
+```
+The above table illustrates the high accuracy of the model.  Looking at the confusion matrix - the first part of the output - we see that the model was right every time it predicted an "A", was right with 756 out of 757 predicted "B"s, 684 out of 690 "C"s, 642 out of 644 "D"s and all 720 predicted "E"s.  The rest of the statistics shown are equally impressive.
+
+Selecting a model based on its performance against a training or test set will tend to favor models that are biased toward those data sets.  To get a more accurate indication of the model's performance, we'll now apply the model to the validation set and determine an estimate for our out-of-sample error.
+
+```{r Validation}
+
+##Apply pre-processing to the Validation set
+
+pmlv1 <- pmlvalidate
+vclass <- pmlv1$classe
+pmlv2 <- pmlv1[,-nzv]
+pmlvset <- subset(pmlv2, select=-c
+                     (X,user_name,raw_timestamp_part_1,raw_timestamp_part_2,cvtd_timestamp,classe))
+pmlvset2 <- pmlvset[-c(which(fr))]
+pmlvset3 <- predict(cs,pmlvset2)
+pmlvset3$user2 <- ifelse(pmlv1$user_name=="carlitos",1,0)
+pmlvset3$user3 <- ifelse(pmlv1$user_name=="charles",1,0)
+pmlvset3$user4 <- ifelse(pmlv1$user_name=="eurico",1,0)
+pmlvset3$user5 <- ifelse(pmlv1$user_name=="jeremy",1,0)
+pmlvset3$user6 <- ifelse(pmlv1$user_name=="pedro",1,0)
+pmlvset4 <- cbind(pmlvset3,classe=vclass)
+
+##Predict on validation set
+predvRF <- predict(fitRF,pmlvset4)
+predvBoost <- predict(fitBoost,pmlvset4)
+
+#Predict with ensemble model:
+pmlvCombine <- data.frame(predRF=predvRF,predBoost=predvBoost,classe=vclass)
+predv_rf <- predict(fitCombine2,pmlvCombine)
+
+#Report out-of-sample error for validation set
+mcev_rf <- sum(predv_rf==pmlvalidate$classe)/length(pmlvalidate$classe)
+vseterror <- 1-round(mcev_rf,4)
+
+```
+
+```{r Out-of-Sample Error Estimate}
+
+print(vseterror)
+
+```
+
+As can be seen, the out-of-sample error is quite small at 0.0018.  We can expect this prediction model to misclassify only about 2 out of 1000 cases.  Note that this applies to dumbbell curls done by the six subjects that took part in the training data set.  This level of error will not necessarily hold if the prediction model is applied to other subjects.
+
+Ultimately (not in this report) we will apply this model to a data set to predict the class of movement for 20 samples.  If the estimated out-of-sample error holds true, we can expect the number of correctly classified samples to be binomial with p = 0.9982.  The probability that k out of the 20 samples are classified correctly is (20 choose k) x (0.9982)^k x (1-0.9982)^(20-k).  This results in a 96% probability that all 20 samples will be classified correctly, and a 99.9% probability that no more than 1 sample will be classified incorrectly.
+
+
+
+
+
